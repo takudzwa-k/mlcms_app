@@ -1,0 +1,1 @@
+{"flutter":{"platforms":{"android":{"default":{"projectId":"mlcms-app","appId":"1:732544838915:android:b6ae5ab73015f7901a0d36","fileOutput":"android/app/google-services.json"}},"dart":{"lib/firebase_options.dart":{"projectId":"mlcms-app","configurations":{"android":"1:732544838915:android:b6ae5ab73015f7901a0d36","ios":"1:732544838915:ios:9bba57e77eba12381a0d36"}}}}}}

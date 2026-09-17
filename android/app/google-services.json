@@ -1,0 +1,49 @@
+{
+  "project_info": {
+    "project_number": "732544838915",
+    "firebase_url": "https://mlcms-app-default-rtdb.firebaseio.com",
+    "project_id": "mlcms-app",
+    "storage_bucket": "mlcms-app.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:732544838915:android:b6ae5ab73015f7901a0d36",
+        "android_client_info": {
+          "package_name": "com.example.mlcms_app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCNTr0xtRxoDT1aCSSRhlx3IZBnLj0832A"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:732544838915:android:72789aa91f59eb8f1a0d36",
+        "android_client_info": {
+          "package_name": "com.group3.mlcms"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCNTr0xtRxoDT1aCSSRhlx3IZBnLj0832A"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
