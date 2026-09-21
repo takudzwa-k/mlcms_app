@@ -1,6 +1,6 @@
 # mlcms_app
 
-A new Flutter project.
+MLCMS is a eeal-time fridge monitoring that protects diagnostic samples.
 
 ## Getting Started
 
