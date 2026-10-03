@@ -1,11 +1,9 @@
 import 'package:flutter/material.dart';
-
 import '../services/fridge_service.dart';
-import '../services/auth_service.dart';
 import '../models/fridge.dart';
+import '../widgets/app_drawer.dart';
 import 'fridge_detail_screen.dart';
 import 'add_fridge_screen.dart';
-import 'manage_fridges_screen.dart';
 
 class DashboardScreen extends StatelessWidget {
   const DashboardScreen({super.key});
@@ -17,22 +15,8 @@ class DashboardScreen extends StatelessWidget {
     return Scaffold(
       appBar: AppBar(
         title: const Text('Dashboard'),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.list_alt),
-            onPressed: () {
-              Navigator.push(
-                context,
-                MaterialPageRoute(builder: (_) => const ManageFridgesScreen()),
-              );
-            },
-          ),
-          IconButton(
-            icon: const Icon(Icons.logout),
-            onPressed: () => AuthService().signOut(),
-          ),
-        ],
       ),
+      drawer: const AppDrawer(),
       body: StreamBuilder<List<Fridge>>(
         stream: fridgeService.fridgesStream,
         builder: (context, snapshot) {
@@ -136,7 +120,7 @@ class DashboardScreen extends StatelessWidget {
           );
         },
         child: const Icon(Icons.add),
-      ), 
+      ),
     );
   }
 }

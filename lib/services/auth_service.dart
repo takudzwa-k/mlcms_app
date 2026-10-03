@@ -25,6 +25,15 @@ class AuthService {
     final snapshot = await _usersRef.child(uid).child('role').get();
     return snapshot.exists ? snapshot.value as String : null;
   }
+    Future<Map<String, dynamic>?> getUserData(String uid) async {
+    final snapshot = await _usersRef.child(uid).get();
+    if (!snapshot.exists) return null;
+    return Map<String, dynamic>.from(snapshot.value as Map);
+  }
+
+  Future<void> updateDisplayName(String uid, String name) async {
+    await _usersRef.child(uid).update({'name': name});
+  }
 
   Future<void> signOut() => _auth.signOut();
 }
