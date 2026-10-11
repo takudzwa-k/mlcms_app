@@ -1,3 +1,4 @@
+import 'alert_state.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_database/firebase_database.dart';
 
@@ -35,5 +36,8 @@ class AuthService {
     await _usersRef.child(uid).update({'name': name});
   }
 
-  Future<void> signOut() => _auth.signOut();
+  Future<void> signOut() {
+    AlertState.unread.value = 0; // clear the Alerts badge
+    return _auth.signOut();
+  }
 }

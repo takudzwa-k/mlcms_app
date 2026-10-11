@@ -53,6 +53,20 @@ class FridgeService {
       'maxTemp': maxTemp,
     });
   }
+    Future<void> updateThresholds({
+    required String id,
+    required double minTemp,
+    required double maxTemp,
+    required double minHumidity,
+    required double maxHumidity,
+  }) async {
+    await _fridgesRef.child(id).update({
+      'minTemp': minTemp,
+      'maxTemp': maxTemp,
+      'minHumidity': minHumidity,
+      'maxHumidity': maxHumidity,
+    });
+  }  
     Stream<Fridge?> fridgeStream(String id) {
     return _fridgesRef.child(id).onValue.map((event) {
       final data = event.snapshot.value;
@@ -60,4 +74,43 @@ class FridgeService {
       return Fridge.fromMap(id, Map<dynamic, dynamic>.from(data as Map));
     });
   }
+   Future<void> acknowledge(String id, String by) async {
+    await _fridgesRef.child(id).update({
+      'ackBy': by,
+      'ackAt': DateTime.now().millisecondsSinceEpoch,
+    });
+  }
+
+  // untilMs = 0 clears the mute
+  Future<void> setMute(String id, int untilMs) async {
+    await _fridgesRef.child(id).update({'mutedUntil': untilMs});
+  }
+
+  // Saves a cooling request to the command log. No hardware is driven yet.
+  Future<void> logCommand({
+    required String id,
+    required String type,
+    required String by,
+    String? note,
+    double? target,
+    int? level,
+  }) async {
+    final db = FirebaseDatabase.instance.ref();
+    final key = db.child('commands/$id').push().key!;
+
+    final updates = <String, Object?>{
+      'commands/$id/$key': {
+        't': DateTime.now().millisecondsSinceEpoch,
+        'type': type,
+        'by': by,
+        if (note != null && note.isNotEmpty) 'note': note,
+        if (target != null) 'target': target,
+        if (level != null) 'level': level,
+      },
+    };
+    if (level != null) updates['fridges/$id/coolingLevel'] = level;
+    if (target != null) updates['fridges/$id/targetTemp'] = target;
+
+    await db.update(updates);
+  } 
 }
