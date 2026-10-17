@@ -6,6 +6,7 @@ import 'dashboard_screen.dart';
 import 'alerts_screen.dart';
 import 'analytics_screen.dart';
 import 'thresholds_screen.dart';
+import '../services/notification_service.dart';
 
 class MainShell extends StatefulWidget {
   const MainShell({super.key});
@@ -33,6 +34,12 @@ class _MainShellState extends State<MainShell>
     AnalyticsScreen(),
     ThresholdsScreen(),
   ];
+    
+    @override
+    void initState() {
+      super.initState();
+      NotificationService.start(); // subscribes this phone to alerts
+    }  
 
   @override
   void dispose() {

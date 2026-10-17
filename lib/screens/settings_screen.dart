@@ -6,6 +6,7 @@ import '../services/demo_data.dart';
 import '../services/fridge_service.dart';
 import '../theme/app_theme.dart';
 import '../widgets/surfaces.dart';
+import '../widgets/notifications_card.dart';
 
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({super.key});
@@ -151,6 +152,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
               ],
             ),
           ),
+          const SizedBox(height: 28),
+          _sectionLabel('NOTIFICATIONS'),
+          const NotificationsCard(),
           if (_isSupervisor) ...[
             const SizedBox(height: 28),
             _sectionLabel('DEMO TOOLS'),

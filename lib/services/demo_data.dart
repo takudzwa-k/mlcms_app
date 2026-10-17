@@ -109,16 +109,33 @@ class DemoData {
 
       updates['readings/${f.id}'] = readings;
       updates['fridges/${f.id}/lastSeen'] = now; // shows the unit as live
+      // simulated hardware health, for the Hardware screen
+      const rssiValues = [-58, -79, -66];
+      final h = f.id.hashCode.abs();
+      String hex(int n) =>
+          (n & 0xFF).toRadixString(16).toUpperCase().padLeft(2, '0');
+      updates['devices/${f.id}'] = {
+        'mac': '24:6F:28:${hex(h)}:${hex(h >> 8)}:${hex(h >> 16)}',
+        'fw': '1.0.0',
+        'rssi': rssiValues[(unitIndex - 1) % rssiValues.length],
+        'sensorOk': true,
+        'uptimeS': 172800 + (h % 90000),
+      };      
       written += points;
     }
 
     if (updates.isEmpty) return 0;
+    // Marks the history as simulated, so exported reports can say so
+    updates['readings/_demo'] = now;
     await db.update(updates);
     return written;
   }
 
-  /// Removes every stored reading.
+  /// Removes every stored reading and the simulated hardware details.
   static Future<void> clear() {
-    return FirebaseDatabase.instance.ref('readings').remove();
+    return FirebaseDatabase.instance.ref().update({
+      'readings': null,
+      'devices': null,
+    });
   }
 }

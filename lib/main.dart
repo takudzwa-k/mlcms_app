@@ -4,6 +4,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'firebase_options.dart';
 import 'services/auth_service.dart';
 import 'services/app_settings.dart';
+import 'services/notification_service.dart';
 import 'theme/app_theme.dart';
 import 'screens/login_screen.dart';
 import 'screens/main_shell.dart';
@@ -25,6 +26,8 @@ class MyApp extends StatelessWidget {
         return MaterialApp(
           title: 'MLCMS',
           debugShowCheckedModeBanner: false,
+          navigatorKey: navigatorKey,
+          scaffoldMessengerKey: messengerKey,
           theme: AppTheme.light(),
           darkTheme: AppTheme.dark(),
           themeMode: isDark ? ThemeMode.dark : ThemeMode.light,
@@ -32,7 +35,7 @@ class MyApp extends StatelessWidget {
             physics: const BouncingScrollPhysics(
               parent: AlwaysScrollableScrollPhysics(),
             ),
-          ),          
+          ),
           home: StreamBuilder<User?>(
             stream: AuthService().authStateChanges,
             builder: (context, snapshot) {

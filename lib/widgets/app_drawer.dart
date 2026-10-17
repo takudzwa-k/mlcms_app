@@ -7,6 +7,7 @@ import '../screens/manage_fridges_screen.dart';
 import '../screens/account_screen.dart';
 import '../screens/settings_screen.dart';
 import 'surfaces.dart';
+import '../screens/hardware_screen.dart';
 
 class AppDrawer extends StatelessWidget {
   const AppDrawer({super.key});
@@ -102,6 +103,12 @@ class AppDrawer extends StatelessWidget {
                   subtitle: 'Register and review equipment',
                   onTap: () => _open(context, const ManageFridgesScreen()),
                 ),
+                _DrawerItem(
+                  icon: Icons.memory,
+                  title: 'Hardware',
+                  subtitle: 'Sensor nodes and check-ups',
+                  onTap: () => _open(context, const HardwareScreen()),
+                ),                
               ],
             ),
           ),

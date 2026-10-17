@@ -1073,7 +1073,7 @@ class _ActionsCardState extends State<_ActionsCard> {
               child: Align(
                 alignment: Alignment.centerLeft,
                 child: Text(
-                  'Push alerts are not built yet, so for now this only records the mute.',
+                  'Silences push alerts for this unit. Supervisors are still told if it stays out of range.',
                   style: TextStyle(fontSize: 12.5, color: Colors.grey.shade600),
                 ),
               ),

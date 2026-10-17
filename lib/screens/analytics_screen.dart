@@ -9,6 +9,7 @@ import '../widgets/motion.dart';
 import '../widgets/screen_header.dart';
 import '../widgets/surfaces.dart';
 import 'fridge_detail_screen.dart';
+import 'report_screen.dart';
 
 bool _isOnline(Fridge f) {
   if (f.lastSeen == 0) return false;
@@ -40,9 +41,17 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> {
     return Scaffold(
       body: Column(
         children: [
-          const ScreenHeader(
+          ScreenHeader(
             title: 'Analytics',
             subtitle: '24-hour operational overview',
+            trailing: IconButton.filledTonal(
+              tooltip: 'Export report (PDF)',
+              icon: const Icon(Icons.picture_as_pdf_outlined),
+              onPressed: () => Navigator.push(
+                context,
+                MaterialPageRoute(builder: (_) => const ReportScreen()),
+              ),
+            ),
           ),
           Expanded(
             child: StreamBuilder<List<Fridge>>(
