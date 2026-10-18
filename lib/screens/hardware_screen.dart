@@ -450,9 +450,8 @@ class _HardwareScreenState extends State<HardwareScreen> {
 
 class _Panel extends StatelessWidget {
   final Widget child;
-  final EdgeInsetsGeometry padding;
 
-  const _Panel({required this.child, this.padding = const EdgeInsets.all(16)});
+  const _Panel({required this.child});
 
   @override
   Widget build(BuildContext context) {
@@ -463,7 +462,7 @@ class _Panel extends StatelessWidget {
         borderRadius: BorderRadius.circular(18),
         boxShadow: softShadow(context),
       ),
-      child: Padding(padding: padding, child: child),
+      child: Padding(padding: const EdgeInsets.all(16), child: child),
     );
   }
 }
