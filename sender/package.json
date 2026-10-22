@@ -1,0 +1,14 @@
+{
+  "name": "mlcms-alert-sender",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Watches the MLCMS database and sends push alerts",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "test-push": "node index.js --test"
+  },
+  "dependencies": {
+    "firebase-admin": "^12.0.0"
+  }
+}

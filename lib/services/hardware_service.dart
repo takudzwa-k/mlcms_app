@@ -1,3 +1,4 @@
+import 'dart:math' as math;
 import 'dart:async';
 import 'package:firebase_database/firebase_database.dart';
 
@@ -168,7 +169,7 @@ class HardwareService {
     Duration timeout = const Duration(seconds: 20),
   }) async {
     final ref = _db.child('devices/$id');
-    final sent = DateTime.now().millisecondsSinceEpoch;
+    final sent = math.Random().nextInt(2000000000) + 1;
     final started = DateTime.now();
 
     await ref.update({'pingAt': sent});

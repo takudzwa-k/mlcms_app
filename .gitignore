@@ -46,3 +46,9 @@ app.*.map.json
 
 # Widget Preview related
 .widget_preview/
+
+# Alert sender secrets and dependencies
+sender/serviceAccountKey.json
+sender/node_modules/
+
+esp32/mlcms_node/secrets.h
