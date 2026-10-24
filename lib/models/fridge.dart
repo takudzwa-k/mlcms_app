@@ -14,8 +14,14 @@ class Fridge {
   final String ackBy; // who acknowledged the current alert
   final int ackAt; // when (milliseconds since epoch), 0 = never
   final int mutedUntil; // 0 = not muted
-  final int coolingLevel; // requested level: -3 (max cooling) to +3, 0 = neutral
-  final double? targetTemp; // requested target, if any
+  final int coolingLevel; // old step-based setting, no longer used
+  final double? targetTemp; // hold the unit at this temperature, if set
+  final double? coolOffset; // manual adjustment in degrees (negative = cooler), if set
+  final double? sensorTemp; // what the DHT22 itself measures
+  final double coolEffect; // cooling the node is adding right now, in degrees
+  final double? coolGoal; // the cooling the node is heading towards
+  final int cmdId; // id of the latest request sent from the app
+  final int cmdAck; // the latest request id the node has carried out
 
   Fridge({
     required this.id,
@@ -35,6 +41,12 @@ class Fridge {
     this.mutedUntil = 0,
     this.coolingLevel = 0,
     this.targetTemp,
+    this.coolOffset,
+    this.sensorTemp,
+    this.coolEffect = 0,
+    this.coolGoal,
+    this.cmdId = 0,
+    this.cmdAck = 0,
   });
 
   // Converts raw Firebase data into a Fridge object
@@ -56,10 +68,17 @@ class Fridge {
       ackAt: ((map['ackAt'] ?? 0) as num).toInt(),
       mutedUntil: ((map['mutedUntil'] ?? 0) as num).toInt(),
       coolingLevel: ((map['coolingLevel'] ?? 0) as num).toInt(),
-      targetTemp:
-          map['targetTemp'] is num ? (map['targetTemp'] as num).toDouble() : null,
+      targetTemp: _asDouble(map['targetTemp']),
+      coolOffset: _asDouble(map['coolOffset']),
+      sensorTemp: _asDouble(map['sensorTemp']),
+      coolEffect: _asDouble(map['coolEffect']) ?? 0,
+      coolGoal: _asDouble(map['coolGoal']),
+      cmdId: ((map['cmdId'] ?? 0) as num).toInt(),
+      cmdAck: ((map['cmdAck'] ?? 0) as num).toInt(),
     );
   }
+
+  static double? _asDouble(Object? v) => v is num ? v.toDouble() : null;
 
   // true if temperature is within the safe min/max range
   bool get inRange => temperature >= minTemp && temperature <= maxTemp;
@@ -69,4 +88,7 @@ class Fridge {
 
   // true only when there's a real reading and it's outside the safe range
   bool get isBreaching => hasData && !inRange;
+
+  // a request has been sent from the app but the node hasn't picked it up yet
+  bool get commandPending => cmdId != 0 && cmdId != cmdAck;
 }

@@ -1,5 +1,6 @@
 // MLCMS alert sender
-// Watches the Realtime Database and sends push alerts through Firebase Cloud Messaging.
+// Watches the Realtime Database and sends a push alert EVERY time a unit leaves
+// its safe range, and another when it is back inside it.
 //
 //   node index.js          run the sender (leave it running)
 //   node index.js --test   send one test notification and exit
@@ -13,17 +14,19 @@ const KEY_PATH =
 const DATABASE_URL =
   process.env.DATABASE_URL || 'https://mlcms-app-default-rtdb.firebaseio.com';
 
-// Timings. Override any of them when starting, for example:
-//   CONFIRM_SECONDS=15 ESCALATE_MINUTES=2 node index.js
+// Timings. 0 is allowed. Override any of them when starting, for example:
+//   RECOVER_SECONDS=30 node index.js
 const num = (name, fallback) => {
-  const v = Number(process.env[name]);
-  return Number.isFinite(v) && v > 0 ? v : fallback;
+  const raw = process.env[name];
+  if (raw === undefined || raw === '') return fallback;
+  const v = Number(raw);
+  return Number.isFinite(v) && v >= 0 ? v : fallback;
 };
-const CONFIRM_MS = num('CONFIRM_SECONDS', 60) * 1000; // out of range this long = alert
-const RECOVER_MS = num('RECOVER_SECONDS', 60) * 1000; // in range this long = resolved
+const CONFIRM_MS = num('CONFIRM_SECONDS', 0) * 1000; // 0 = alert the moment a unit leaves its range
+const RECOVER_MS = num('RECOVER_SECONDS', 0) * 1000; // 0 = every return to range counts
 const ESCALATE_MS = num('ESCALATE_MINUTES', 15) * 60 * 1000; // still out = tell supervisors
 const STALE_MS = num('STALE_MINUTES', 15) * 60 * 1000; // ignore units silent this long
-const TICK_MS = 10 * 1000; // how often time-based rules are checked
+const TICK_MS = 5 * 1000; // how often time-based rules are checked
 
 if (!fs.existsSync(KEY_PATH)) {
   console.error(
@@ -123,16 +126,18 @@ function evaluate() {
     const out = above || temp < min;
     const muted = Number(f.mutedUntil) > now;
 
-    if (s.phase === 'ok') {
-      if (out) {
-        s.phase = 'pending';
-        s.since = now;
-        s.recoverSince = 0;
-        s.escalated = false;
-        save(id);
-        log(`${name}: out of range, waiting ${CONFIRM_MS / 1000}s to confirm`);
-      }
-    } else if (s.phase === 'pending') {
+    // 1. the unit has just gone out of range
+    if (s.phase === 'ok' && out) {
+      s.phase = 'pending';
+      s.since = now;
+      s.recoverSince = 0;
+      s.escalated = false;
+      save(id);
+      log(`${name}: out of range (${signed(temp)}°C)`);
+    }
+
+    // 2. confirm it (instantly when CONFIRM_SECONDS is 0)
+    if (s.phase === 'pending') {
       if (!out) {
         s.phase = 'ok';
         s.since = 0;
@@ -156,12 +161,14 @@ function evaluate() {
           );
         }
       }
-    } else if (s.phase === 'breach') {
+    }
+
+    // 3. while it is in breach
+    if (s.phase === 'breach') {
       if (!out) {
-        if (!s.recoverSince) {
-          s.recoverSince = now;
-          save(id);
-        } else if (now - s.recoverSince >= RECOVER_MS) {
+        if (!s.recoverSince) s.recoverSince = now;
+
+        if (now - s.recoverSince >= RECOVER_MS) {
           const mins = minutes(now - s.since);
           s.phase = 'ok';
           s.since = 0;
@@ -178,6 +185,8 @@ function evaluate() {
               'resolved'
             );
           }
+        } else {
+          save(id);
         }
       } else {
         if (s.recoverSince) {
@@ -218,8 +227,8 @@ function evaluate() {
 async function start() {
   log('MLCMS alert sender starting');
   log(
-    `confirm ${CONFIRM_MS / 1000}s, recover ${RECOVER_MS / 1000}s, ` +
-      `escalate ${ESCALATE_MS / 60000} min, ignore data older than ${STALE_MS / 60000} min`
+    `alert after ${CONFIRM_MS / 1000}s out of range, resolve after ${RECOVER_MS / 1000}s in range, ` +
+      `escalate after ${ESCALATE_MS / 60000} min, ignore data older than ${STALE_MS / 60000} min`
   );
 
   // pick up where we left off, so a restart doesn't repeat or lose alerts

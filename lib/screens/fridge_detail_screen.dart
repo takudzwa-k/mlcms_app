@@ -12,6 +12,7 @@ import '../widgets/history_builder.dart';
 import '../widgets/motion.dart';
 import '../widgets/surfaces.dart';
 import 'edit_fridge_screen.dart';
+import 'package:firebase_database/firebase_database.dart';
 
 // ---------- Formatting helpers ----------
 
@@ -85,13 +86,6 @@ String _advice(Fridge f) {
   }
   return 'Reduce cooling one notch to avoid freezing the contents. If no improvement in 5 min, move samples.';
 }
-
-String _levelLabel(int l) {
-  if (l == 0) return 'Neutral';
-  return l < 0 ? 'Cooling ${-l}/3' : 'Warming $l/3';
-}
-
-int _clampLevel(int v) => v < -3 ? -3 : (v > 3 ? 3 : v);
 
 // ---------- The screen ----------
 
@@ -1280,6 +1274,24 @@ class _CoolingSectionState extends State<_CoolingSection> {
   }
 }
 
+// ---------- Cooling control ----------
+
+class _CoolerInfo {
+  final bool? running; // null = the node hasn't reported a cooler yet
+  final bool simulated;
+
+  const _CoolerInfo({required this.running, required this.simulated});
+}
+
+// 3 / 2.5 (no trailing .0, no sign)
+String _plain(double v) =>
+    v == v.roundToDouble() ? v.toStringAsFixed(0) : v.toStringAsFixed(1);
+
+// +3 / -2.5 / 0
+String _fmtDelta(double v) => v > 0 ? '+${_plain(v)}' : _plain(v);
+
+double _r1(double v) => (v * 10).round() / 10;
+
 class _CoolingControls extends StatefulWidget {
   final Fridge fridge;
   final String userName;
@@ -1297,176 +1309,260 @@ class _CoolingControls extends StatefulWidget {
 
 class _CoolingControlsState extends State<_CoolingControls> {
   final _noteCtrl = TextEditingController();
-  final _targetCtrl = TextEditingController();
+  final _deltaCtrl = TextEditingController(text: '0');
+  double? _delta = 0; // null = what is typed isn't a number yet
   bool _busy = false;
   String? _message;
   bool _isError = false;
 
+  late final Stream<DatabaseEvent> _device =
+      FirebaseDatabase.instance.ref('devices/${widget.fridge.id}').onValue;
+
   @override
   void dispose() {
     _noteCtrl.dispose();
-    _targetCtrl.dispose();
+    _deltaCtrl.dispose();
     super.dispose();
   }
 
   String get _by => widget.userName.isEmpty ? 'unknown' : widget.userName;
 
-  Future<void> _send(String type, String label, int level) async {
+  bool get _nodeOnline {
+    final f = widget.fridge;
+    return f.hasData &&
+        DateTime.now().millisecondsSinceEpoch - f.lastSeen < 5 * 60 * 1000;
+  }
+
+  // The middle of the safe range, to the nearest half degree
+  double get _holdPoint {
+    final f = widget.fridge;
+    return (f.minTemp + f.maxTemp).round() / 2;
+  }
+
+  // Where the unit is heading with the current request
+  double get _destination {
+    final f = widget.fridge;
+    if (f.targetTemp != null) return f.targetTemp!;
+    final base = f.sensorTemp ?? (f.temperature - f.coolEffect);
+    return base + (f.coolOffset ?? 0);
+  }
+
+  void _onTyped(String text) {
+    setState(() => _delta = double.tryParse(text.trim().replaceAll(',', '.')));
+  }
+
+  void _nudge(double step) {
+    final next = _r1((_delta ?? 0) + step);
+    HapticFeedback.selectionClick();
+    setState(() {
+      _delta = next;
+      _deltaCtrl.text = _fmtDelta(next);
+      _deltaCtrl.selection =
+          TextSelection.collapsed(offset: _deltaCtrl.text.length);
+    });
+  }
+
+  // Runs one command and shows the result
+  Future<bool> _run(Future<void> Function() action, String done) async {
     setState(() {
       _busy = true;
       _message = null;
     });
     try {
-      await FridgeService().logCommand(
-        id: widget.fridge.id,
-        type: type,
-        by: _by,
-        note: _noteCtrl.text.trim(),
-        level: level,
-      );
-      if (!mounted) return;
+      await action();
+      if (!mounted) return true;
       HapticFeedback.mediumImpact();
       _noteCtrl.clear();
       setState(() {
         _busy = false;
         _isError = false;
-        _message = '$label saved to the command log.';
+        _message = _nodeOnline
+            ? done
+            : '$done The node is offline, so it will apply when it reconnects.';
       });
+      return true;
     } catch (e) {
-      if (!mounted) return;
+      if (!mounted) return false;
       setState(() {
         _busy = false;
         _isError = true;
         _message = 'Could not save. Check your connection and try again.';
+      });
+      return false;
+    }
+  }
+
+  Future<void> _bringIntoRange() {
+    final point = _holdPoint;
+    return _run(
+      () => FridgeService().logCommand(
+        id: widget.fridge.id,
+        type: 'bring_in_range',
+        by: _by,
+        note: _noteCtrl.text.trim(),
+        target: point,
+      ),
+      'Sent. The unit will be taken to ${_signed(point)}°C and held there.',
+    );
+  }
+
+  Future<void> _applyDelta() async {
+    final f = widget.fridge;
+    final d = _delta;
+    if (d == null || d == 0) return;
+
+    final holding = f.targetTemp != null;
+    final settles = _destination + d;
+
+    final ok = await _run(
+      () => FridgeService().logCommand(
+        id: f.id,
+        type: d < 0 ? 'cool_by' : 'warm_by',
+        by: _by,
+        note: _noteCtrl.text.trim(),
+        delta: d,
+        // while holding, the target moves; otherwise the adjustment adds up
+        target: holding ? _r1(f.targetTemp! + d) : null,
+        offset: holding ? null : _r1((f.coolOffset ?? 0) + d),
+      ),
+      '${d < 0 ? 'Cool' : 'Warm'} by ${_plain(d.abs())}°C sent. '
+      'The unit will settle at ${_signed(settles)}°C.',
+    );
+
+    if (ok && mounted) {
+      setState(() {
+        _delta = 0;
+        _deltaCtrl.text = '0';
       });
     }
   }
 
-  Future<void> _apply() async {
-    final f = widget.fridge;
-    final v = double.tryParse(_targetCtrl.text.trim().replaceAll(',', '.'));
-
-    if (v == null) {
-      setState(() {
-        _isError = true;
-        _message = 'Enter a temperature in °C.';
-      });
-      return;
-    }
-    if (v < f.minTemp || v > f.maxTemp) {
-      setState(() {
-        _isError = true;
-        _message =
-            'The target must be inside the safe range (${_limit(f.minTemp)} to ${_limit(f.maxTemp)}).';
-      });
-      return;
-    }
-
-    setState(() {
-      _busy = true;
-      _message = null;
-    });
-    try {
-      await FridgeService().logCommand(
-        id: f.id,
-        type: 'set_target',
+  Future<void> _reset() {
+    return _run(
+      () => FridgeService().logCommand(
+        id: widget.fridge.id,
+        type: 'reset_auto',
         by: _by,
         note: _noteCtrl.text.trim(),
-        target: v,
-      );
-      if (!mounted) return;
-      HapticFeedback.mediumImpact();
-      _targetCtrl.clear();
-      _noteCtrl.clear();
-      setState(() {
-        _busy = false;
-        _isError = false;
-        _message = 'Target of ${_signed(v)}°C saved to the command log.';
-      });
-    } catch (e) {
-      if (!mounted) return;
-      setState(() {
-        _busy = false;
-        _isError = true;
-        _message = 'Could not save. Check your connection and try again.';
-      });
-    }
+        reset: true,
+      ),
+      'Cooling returned to automatic.',
+    );
+  }
+
+  Widget _preview(Fridge f, double delta) {
+    final after = _destination + delta;
+    final inside = after >= f.minTemp && after <= f.maxTemp;
+    final color = inside ? AppColors.ok : AppColors.danger;
+    final where = inside
+        ? 'inside the safe range'
+        : (after > f.maxTemp ? 'still above the safe range' : 'below the safe range');
+
+    return Text.rich(
+      TextSpan(
+        children: [
+          const TextSpan(text: 'After applying, the unit settles at '),
+          TextSpan(
+            text: '${_signed(after)}°C',
+            style: AppTheme.mono(size: 13, color: color),
+          ),
+          TextSpan(text: ', $where.'),
+        ],
+      ),
+      style: TextStyle(
+        fontSize: 13,
+        height: 1.4,
+        color: color,
+        fontWeight: FontWeight.w600,
+      ),
+    );
   }
 
   @override
   Widget build(BuildContext context) {
     final f = widget.fridge;
     final canSend = widget.enabled && !_busy;
+    final online = _nodeOnline;
+    final holding = f.targetTemp != null;
+    final adjusted = !holding && (f.coolOffset ?? 0).abs() > 0.05;
+    final overridden = holding || adjusted;
+    final tooWarm = f.hasData && f.temperature > f.maxTemp;
+    final tooCold = f.hasData && f.temperature < f.minTemp;
+    final d = _delta;
+    final hasDelta = d != null && d != 0;
 
-    return _Card(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
+    final mode = holding
+        ? 'Holding ${_signed(f.targetTemp!)}°C'
+        : (adjusted ? 'Adjusted ${_signed(f.coolOffset!)}°C' : 'Automatic');
+
+    return StreamBuilder<DatabaseEvent>(
+      stream: _device,
+      builder: (context, snap) {
+        final raw = snap.data?.snapshot.value;
+        final dev = raw is Map ? raw : const {};
+        final info = _CoolerInfo(
+          running: dev.containsKey('cooling') ? dev['cooling'] == true : null,
+          simulated: dev['plantSim'] == true,
+        );
+
+        return _Card(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              const Expanded(child: _CardLabel('MANUAL COOLING CONTROL')),
-              const SizedBox(width: 8),
-              Text(_levelLabel(f.coolingLevel), style: AppTheme.mono(size: 12)),
-            ],
-          ),
-          const SizedBox(height: 14),
-          _Gauge(level: f.coolingLevel),
-          const SizedBox(height: 16),
-          Row(
-            children: [
-              Expanded(
-                child: _CommandButton(
-                  icon: Icons.remove,
-                  label: 'More Cooling',
-                  color: AppColors.teal,
-                  onTap: canSend
-                      ? () => _send('more_cooling', 'Cooling request',
-                          _clampLevel(f.coolingLevel - 1))
-                      : null,
-                ),
+              Row(
+                children: [
+                  const Expanded(child: _CardLabel('COOLING CONTROL')),
+                  const SizedBox(width: 8),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                    decoration: BoxDecoration(
+                      color: (overridden ? AppColors.teal : Colors.grey).withAlpha(30),
+                      borderRadius: BorderRadius.circular(20),
+                    ),
+                    child: Text(
+                      mode,
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w800,
+                        color: overridden ? AppColors.teal : Colors.grey.shade700,
+                      ),
+                    ),
+                  ),
+                ],
               ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: _CommandButton(
-                  icon: Icons.bolt,
-                  label: 'Emergency Cool',
-                  color: AppColors.danger,
-                  onTap: canSend
-                      ? () => _send('emergency_cool', 'Emergency cooling request', -3)
-                      : null,
-                ),
+              const SizedBox(height: 14),
+              _StatusBanner(
+                fridge: f,
+                info: info,
+                online: online,
+                destination: _destination,
               ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: _CommandButton(
-                  icon: Icons.add,
-                  label: 'Less Cooling',
-                  color: AppColors.warn,
-                  onTap: canSend
-                      ? () => _send('less_cooling', 'Reduced-cooling request',
-                          _clampLevel(f.coolingLevel + 1))
-                      : null,
+              if (online && info.simulated && f.sensorTemp != null && f.coolGoal != null) ...[
+                const SizedBox(height: 12),
+                _Equation(fridge: f),
+              ],
+              if (!holding && (tooWarm || tooCold)) ...[
+                const SizedBox(height: 16),
+                ElevatedButton.icon(
+                  onPressed: canSend ? _bringIntoRange : null,
+                  icon: Icon(
+                    tooWarm ? Icons.arrow_downward : Icons.arrow_upward,
+                    size: 20,
+                  ),
+                  label: Text(tooWarm ? 'Bring back into range' : 'Warm up into range'),
                 ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 14),
-          TextField(
-            controller: _noteCtrl,
-            enabled: canSend,
-            decoration: const InputDecoration(
-              hintText: 'Optional note for command log...',
-            ),
-          ),
-          const SizedBox(height: 16),
-          const Divider(height: 1),
-          const SizedBox(height: 14),
-          Row(
-            children: [
-              Icon(Icons.track_changes, size: 15, color: Colors.grey.shade600),
-              const SizedBox(width: 6),
+                const SizedBox(height: 8),
+                Text(
+                  'Takes the unit to ${_signed(_holdPoint)}°C, the middle of its safe range, '
+                  'and keeps it there.',
+                  style: TextStyle(fontSize: 12.5, height: 1.35, color: Colors.grey.shade600),
+                ),
+              ],
+              const SizedBox(height: 22),
+              const Divider(height: 1),
+              const SizedBox(height: 18),
               Text(
-                'SET TARGET TEMPERATURE',
+                'CHANGE THE TEMPERATURE BY',
                 style: TextStyle(
                   fontSize: 11.5,
                   fontWeight: FontWeight.w700,
@@ -1474,71 +1570,391 @@ class _CoolingControlsState extends State<_CoolingControls> {
                   color: Colors.grey.shade600,
                 ),
               ),
-            ],
-          ),
-          const SizedBox(height: 10),
-          Row(
-            children: [
-              Expanded(
-                child: TextField(
-                  controller: _targetCtrl,
-                  enabled: canSend,
-                  keyboardType: const TextInputType.numberWithOptions(
-                    signed: true,
-                    decimal: true,
+              const SizedBox(height: 10),
+              Row(
+                children: [
+                  _StepButton(
+                    icon: Icons.remove,
+                    onTap: canSend ? () => _nudge(-1) : null,
                   ),
-                  decoration: InputDecoration(
-                    hintText: '${_limit(f.minTemp)} to ${_limit(f.maxTemp)}',
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: TextField(
+                      controller: _deltaCtrl,
+                      enabled: canSend,
+                      textAlign: TextAlign.center,
+                      keyboardType: const TextInputType.numberWithOptions(
+                        signed: true,
+                        decimal: true,
+                      ),
+                      onChanged: _onTyped,
+                      onTap: () => _deltaCtrl.selection = TextSelection(
+                        baseOffset: 0,
+                        extentOffset: _deltaCtrl.text.length,
+                      ),
+                      style: AppTheme.mono(
+                        size: 24,
+                        color: (d == null || d == 0)
+                            ? null
+                            : (d < 0 ? AppColors.teal : AppColors.warn),
+                      ),
+                      decoration: const InputDecoration(
+                        suffixText: '°C',
+                        hintText: '0',
+                      ),
+                    ),
                   ),
-                ),
+                  const SizedBox(width: 12),
+                  _StepButton(
+                    icon: Icons.add,
+                    onTap: canSend ? () => _nudge(1) : null,
+                  ),
+                ],
               ),
-              const SizedBox(width: 12),
-              SizedBox(
-                width: 96,
-                child: ElevatedButton(
-                  onPressed: canSend ? _apply : null,
-                  style: ElevatedButton.styleFrom(minimumSize: const Size(96, 52)),
-                  child: const Text('Apply'),
-                ),
+              const SizedBox(height: 10),
+              Text(
+                'Use a negative number to cool and a positive number to warm. '
+                'Changes add up until you return to automatic.',
+                style: TextStyle(fontSize: 12.5, height: 1.35, color: Colors.grey.shade600),
               ),
-            ],
-          ),
-          if (_message != null) ...[
-            const SizedBox(height: 12),
-            Container(
-              width: double.infinity,
-              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-              decoration: BoxDecoration(
-                color: _isError ? AppColors.dangerLight : AppColors.okLight,
-                borderRadius: BorderRadius.circular(12),
-              ),
-              child: Text(
-                _message!,
-                style: TextStyle(
-                  color: _isError ? AppColors.danger : AppColors.ok,
-                  fontWeight: FontWeight.w600,
-                  fontSize: 13,
-                ),
-              ),
-            ),
-          ],
-          const SizedBox(height: 12),
-          if (!widget.enabled)
-            Row(
-              children: [
-                Icon(Icons.lock_outline, size: 14, color: Colors.grey.shade600),
-                const SizedBox(width: 6),
-                Expanded(
-                  child: Text(
-                    'Only supervisors can send cooling requests.',
-                    style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
+              if (hasDelta) ...[
+                const SizedBox(height: 10),
+                _preview(f, d!),
+              ] else if (d == null) ...[
+                const SizedBox(height: 10),
+                const Text(
+                  'Enter a number, such as -3 or 2.5.',
+                  style: TextStyle(
+                    fontSize: 12.5,
+                    fontWeight: FontWeight.w600,
+                    color: AppColors.danger,
                   ),
                 ),
               ],
-            ),
-          if (!widget.enabled) const SizedBox(height: 6),
+              const SizedBox(height: 14),
+              ElevatedButton.icon(
+                onPressed: (canSend && hasDelta) ? _applyDelta : null,
+                icon: Icon(
+                  hasDelta && d! > 0 ? Icons.arrow_upward : Icons.arrow_downward,
+                  size: 20,
+                ),
+                label: Text(
+                  !hasDelta
+                      ? 'Enter an amount'
+                      : (d! < 0
+                          ? 'Cool by ${_plain(d.abs())}°C'
+                          : 'Warm by ${_plain(d)}°C'),
+                ),
+              ),
+              if (overridden) ...[
+                const SizedBox(height: 10),
+                OutlinedButton.icon(
+                  onPressed: canSend ? _reset : null,
+                  icon: const Icon(Icons.restart_alt, size: 18),
+                  label: const Text('Return to automatic'),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: AppColors.teal,
+                    side: BorderSide(color: AppColors.teal.withAlpha(120)),
+                    minimumSize: const Size(double.infinity, 46),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(14),
+                    ),
+                    textStyle: const TextStyle(fontWeight: FontWeight.w700),
+                  ),
+                ),
+              ],
+              const SizedBox(height: 16),
+              TextField(
+                controller: _noteCtrl,
+                enabled: canSend,
+                decoration: const InputDecoration(
+                  hintText: 'Optional note for the command log...',
+                ),
+              ),
+              if (_message != null) ...[
+                const SizedBox(height: 12),
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                  decoration: BoxDecoration(
+                    color: _isError ? AppColors.dangerLight : AppColors.okLight,
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Text(
+                    _message!,
+                    style: TextStyle(
+                      color: _isError ? AppColors.danger : AppColors.ok,
+                      fontWeight: FontWeight.w600,
+                      fontSize: 13,
+                      height: 1.35,
+                    ),
+                  ),
+                ),
+              ],
+              const SizedBox(height: 12),
+              if (!widget.enabled)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 6),
+                  child: Row(
+                    children: [
+                      Icon(Icons.lock_outline, size: 14, color: Colors.grey.shade600),
+                      const SizedBox(width: 6),
+                      Expanded(
+                        child: Text(
+                          'Only supervisors can send cooling requests.',
+                          style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              Text(
+                'Cooling is carried out by the unit\'s sensor node. A node marked '
+                '"simulated" has no cooling hardware, so it adds the adjustment to the '
+                'DHT22 reading in software.',
+                style: TextStyle(fontSize: 12, height: 1.35, color: Colors.grey.shade600),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+}
+
+/// Says in plain words what the cooler is doing right now.
+class _StatusBanner extends StatelessWidget {
+  final Fridge fridge;
+  final _CoolerInfo info;
+  final bool online;
+  final double destination;
+
+  const _StatusBanner({
+    required this.fridge,
+    required this.info,
+    required this.online,
+    required this.destination,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final f = fridge;
+    final dark = Theme.of(context).brightness == Brightness.dark;
+    final goal = f.coolGoal;
+
+    IconData icon = Icons.pause_circle_outline;
+    var busy = false;
+    var bar = false;
+    Color color = Colors.grey;
+    String title;
+    String sub;
+
+    if (!online) {
+      icon = Icons.cloud_off_outlined;
+      title = 'Node offline';
+      sub = 'Requests are saved and will apply when it reconnects.';
+    } else if (f.sensorTemp == null || goal == null) {
+      icon = Icons.system_update_alt;
+      color = AppColors.warn;
+      title = 'Node update needed';
+      sub = 'This node has not reported its cooling status yet. Load the latest firmware on it.';
+    } else if (f.commandPending) {
+      busy = true;
+      bar = true;
+      color = AppColors.teal;
+      title = 'Waiting for the node…';
+      sub = 'Command saved. The node picks it up within a few seconds.';
+    } else if (!info.simulated) {
+      final on = info.running == true;
+      icon = on ? Icons.autorenew : Icons.power_settings_new;
+      color = on ? AppColors.teal : Colors.grey;
+      title = on ? 'Cooler running' : 'Cooler off';
+      sub = 'The DHT22 measures the real temperature of the unit.';
+    } else {
+      final toGo = (goal - f.coolEffect).abs();
+      if (toGo >= 0.3) {
+        final cooling = goal < f.coolEffect;
+        busy = true;
+        bar = true;
+        color = cooling ? AppColors.teal : AppColors.warn;
+        title = cooling ? 'Cooling in progress' : 'Warming in progress';
+        sub = 'Now ${_signed(f.temperature)}°C, heading to ${_signed(destination)}°C. '
+            '${toGo.toStringAsFixed(1)}°C still to go.';
+      } else if (f.targetTemp != null) {
+        icon = Icons.check_circle;
+        color = AppColors.ok;
+        title = 'Target reached';
+        sub = 'Holding the unit at ${_signed(f.targetTemp!)}°C. The cooler adjusts by '
+            'itself if the DHT22 reading changes.';
+      } else if ((f.coolOffset ?? 0).abs() > 0.05) {
+        icon = Icons.check_circle;
+        color = AppColors.ok;
+        title = 'Adjustment applied';
+        sub = 'The cooler is ${f.coolOffset! < 0 ? 'taking off' : 'adding'} '
+            '${_plain(f.coolOffset!.abs())}°C. Nothing is changing now.';
+      } else {
+        title = 'Automatic';
+        sub = 'No cooling is being applied. The unit temperature is the DHT22 reading.';
+      }
+    }
+
+    return AnimatedSize(
+      duration: const Duration(milliseconds: 220),
+      curve: Curves.easeOut,
+      alignment: Alignment.topCenter,
+      child: AnimatedSwitcher(
+        duration: const Duration(milliseconds: 250),
+        child: Container(
+          key: ValueKey('$title|$busy'),
+          width: double.infinity,
+          padding: const EdgeInsets.all(14),
+          decoration: BoxDecoration(
+            color: color.withAlpha(dark ? 44 : 28),
+            borderRadius: BorderRadius.circular(14),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  SizedBox(
+                    width: 24,
+                    height: 24,
+                    child: busy
+                        ? Padding(
+                            padding: const EdgeInsets.all(2),
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2.6,
+                              color: color,
+                            ),
+                          )
+                        : Icon(icon, size: 22, color: color),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          title,
+                          style: TextStyle(
+                            fontSize: 15,
+                            fontWeight: FontWeight.w800,
+                            color: color,
+                          ),
+                        ),
+                        const SizedBox(height: 3),
+                        Text(
+                          sub,
+                          style: TextStyle(
+                            fontSize: 12.5,
+                            height: 1.4,
+                            color: Colors.grey.shade700,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+              if (bar) ...[
+                const SizedBox(height: 12),
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(4),
+                  child: LinearProgressIndicator(
+                    minHeight: 5,
+                    color: color,
+                    backgroundColor: color.withAlpha(40),
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// DHT22 reading + simulated cooler = the unit temperature.
+class _Equation extends StatelessWidget {
+  final Fridge fridge;
+
+  const _Equation({required this.fridge});
+
+  Widget _col(String value, String label, Color? color) {
+    return Expanded(
+      child: Column(
+        children: [
+          FittedBox(
+            fit: BoxFit.scaleDown,
+            child: Text(value, style: AppTheme.mono(size: 20, color: color)),
+          ),
+          const SizedBox(height: 3),
           Text(
-            'No cooling hardware is connected yet. Requests are saved to the command log.',
+            label,
+            textAlign: TextAlign.center,
+            style: TextStyle(fontSize: 11.5, color: Colors.grey.shade600),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _op(String s) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 3),
+      child: SizedBox(
+        width: 20,
+        child: Center(
+          child: Text(
+            s,
+            style: AppTheme.mono(
+              size: 18,
+              weight: FontWeight.w500,
+              color: Colors.grey.shade500,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final f = fridge;
+    final dark = Theme.of(context).brightness == Brightness.dark;
+    final cool = f.coolEffect;
+    final coolColor = cool < -0.05
+        ? AppColors.teal
+        : (cool > 0.05 ? AppColors.warn : Colors.grey.shade600);
+    final unitColor = f.inRange ? AppColors.ok : AppColors.danger;
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.fromLTRB(10, 14, 10, 12),
+      decoration: BoxDecoration(
+        color: dark ? Colors.white.withAlpha(14) : const Color(0xFFF6F7F2),
+        borderRadius: BorderRadius.circular(14),
+      ),
+      child: Column(
+        children: [
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              _col(_signed(f.sensorTemp!), 'DHT22 reading', null),
+              _op('+'),
+              _col(_signed(cool), 'Simulated cooler', coolColor),
+              _op('='),
+              _col(_signed(f.temperature), 'Unit now', unitColor),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Text(
+            'The DHT22 only measures. The cooler\'s adjustment is added on top to '
+            'give the unit temperature.',
+            textAlign: TextAlign.center,
             style: TextStyle(fontSize: 12, height: 1.35, color: Colors.grey.shade600),
           ),
         ],
@@ -1547,102 +1963,11 @@ class _CoolingControlsState extends State<_CoolingControls> {
   }
 }
 
-class _Gauge extends StatelessWidget {
-  final int level;
-
-  const _Gauge({required this.level});
-
-  @override
-  Widget build(BuildContext context) {
-    final labelStyle = AppTheme.mono(
-      size: 10,
-      weight: FontWeight.w500,
-      color: Colors.grey.shade500,
-    );
-    final knobColor = level == 0
-        ? Colors.grey
-        : (level < 0 ? AppColors.teal : AppColors.warn);
-
-    return Column(
-      children: [
-        LayoutBuilder(
-          builder: (context, c) {
-            const knob = 16.0;
-            final pos = (level + 3) / 6;
-
-            return SizedBox(
-              height: 18,
-              child: Stack(
-                children: [
-                  Positioned(
-                    left: 0,
-                    right: 0,
-                    top: 5,
-                    child: Container(
-                      height: 8,
-                      decoration: BoxDecoration(
-                        borderRadius: BorderRadius.circular(4),
-                        gradient: LinearGradient(
-                          colors: [
-                            AppColors.teal.withAlpha(110),
-                            Colors.grey.withAlpha(40),
-                            AppColors.warn.withAlpha(110),
-                          ],
-                        ),
-                      ),
-                    ),
-                  ),
-                  Positioned(
-                    left: c.maxWidth / 2 - 0.5,
-                    top: 2,
-                    child: Container(width: 1, height: 14, color: Colors.grey.shade500),
-                  ),
-                  AnimatedPositioned(
-                    duration: const Duration(milliseconds: 250),
-                    curve: Curves.easeOut,
-                    left: pos * (c.maxWidth - knob),
-                    top: 1,
-                    child: Container(
-                      width: knob,
-                      height: knob,
-                      decoration: BoxDecoration(
-                        color: Colors.white,
-                        shape: BoxShape.circle,
-                        border: Border.all(color: knobColor, width: 3),
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            );
-          },
-        ),
-        const SizedBox(height: 6),
-        Row(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-          children: [
-            Text('← cooling', style: labelStyle),
-            Text('neutral', style: labelStyle),
-            Text('warming →', style: labelStyle),
-          ],
-        ),
-      ],
-    );
-  }
-}
-
-class _CommandButton extends StatelessWidget {
+class _StepButton extends StatelessWidget {
   final IconData icon;
-  final String label;
-  final Color color;
   final VoidCallback? onTap;
 
-  const _CommandButton({
-    required this.icon,
-    required this.label,
-    required this.color,
-    required this.onTap,
-  });
+  const _StepButton({required this.icon, required this.onTap});
 
   @override
   Widget build(BuildContext context) {
@@ -1651,28 +1976,15 @@ class _CommandButton extends StatelessWidget {
     return Opacity(
       opacity: enabled ? 1 : 0.45,
       child: Material(
-        color: color.withAlpha(28),
+        color: AppColors.teal.withAlpha(28),
         borderRadius: BorderRadius.circular(14),
         child: InkWell(
           borderRadius: BorderRadius.circular(14),
           onTap: onTap,
-          child: Padding(
-            padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 4),
-            child: Column(
-              children: [
-                Icon(icon, size: 20, color: color),
-                const SizedBox(height: 6),
-                Text(
-                  label,
-                  textAlign: TextAlign.center,
-                  style: TextStyle(
-                    fontSize: 12,
-                    fontWeight: FontWeight.w700,
-                    color: color,
-                  ),
-                ),
-              ],
-            ),
+          child: SizedBox(
+            width: 54,
+            height: 54,
+            child: Icon(icon, color: AppColors.teal),
           ),
         ),
       ),
