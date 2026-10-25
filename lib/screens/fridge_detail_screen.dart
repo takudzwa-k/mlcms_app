@@ -1279,8 +1279,28 @@ class _CoolingSectionState extends State<_CoolingSection> {
 class _CoolerInfo {
   final bool? running; // null = the node hasn't reported a cooler yet
   final bool simulated;
+  final String fw; // firmware version the node reports, for example "1.3.0"
+  final String err; // the last problem the node reported, if any
 
-  const _CoolerInfo({required this.running, required this.simulated});
+  const _CoolerInfo({
+    required this.running,
+    required this.simulated,
+    this.fw = '',
+    this.err = '',
+  });
+
+  // true when the node runs firmware older than 1.3.0, which can't carry out cooling requests
+  bool get outdated {
+    final parts = fw.split('.').map((p) => int.tryParse(p) ?? 0).toList();
+    while (parts.length < 3) {
+      parts.add(0);
+    }
+    const need = [1, 3, 0];
+    for (var i = 0; i < 3; i++) {
+      if (parts[i] != need[i]) return parts[i] < need[i];
+    }
+    return false;
+  }
 }
 
 // 3 / 2.5 (no trailing .0, no sign)
@@ -1503,6 +1523,8 @@ class _CoolingControlsState extends State<_CoolingControls> {
         final info = _CoolerInfo(
           running: dev.containsKey('cooling') ? dev['cooling'] == true : null,
           simulated: dev['plantSim'] == true,
+          fw: (dev['fw'] ?? '').toString(),
+          err: (dev['err'] ?? '').toString(),
         );
 
         return _Card(
@@ -1723,7 +1745,7 @@ class _CoolingControlsState extends State<_CoolingControls> {
 }
 
 /// Says in plain words what the cooler is doing right now.
-class _StatusBanner extends StatelessWidget {
+class _StatusBanner extends StatefulWidget {
   final Fridge fridge;
   final _CoolerInfo info;
   final bool online;
@@ -1737,10 +1759,34 @@ class _StatusBanner extends StatelessWidget {
   });
 
   @override
+  State<_StatusBanner> createState() => _StatusBannerState();
+}
+
+class _StatusBannerState extends State<_StatusBanner> {
+  int? _pendingId; // the request we are waiting on
+  DateTime? _pendingSince; // when we started waiting
+
+  @override
   Widget build(BuildContext context) {
-    final f = fridge;
+    final f = widget.fridge;
+    final info = widget.info;
+    final destination = widget.destination;
     final dark = Theme.of(context).brightness == Brightness.dark;
     final goal = f.coolGoal;
+
+    // How long has the current request been waiting for the node?
+    if (f.commandPending) {
+      if (_pendingId != f.cmdId) {
+        _pendingId = f.cmdId;
+        _pendingSince = DateTime.now();
+      }
+    } else {
+      _pendingId = null;
+      _pendingSince = null;
+    }
+    final waited = _pendingSince == null
+        ? 0
+        : DateTime.now().difference(_pendingSince!).inSeconds;
 
     IconData icon = Icons.pause_circle_outline;
     var busy = false;
@@ -1749,21 +1795,40 @@ class _StatusBanner extends StatelessWidget {
     String title;
     String sub;
 
-    if (!online) {
+    if (!widget.online) {
       icon = Icons.cloud_off_outlined;
       title = 'Node offline';
       sub = 'Requests are saved and will apply when it reconnects.';
-    } else if (f.sensorTemp == null || goal == null) {
+    } else if (info.outdated) {
       icon = Icons.system_update_alt;
       color = AppColors.warn;
       title = 'Node update needed';
-      sub = 'This node has not reported its cooling status yet. Load the latest firmware on it.';
+      sub = (info.fw.isEmpty
+              ? 'This node has not reported its firmware version.'
+              : 'This node runs firmware v${info.fw}.') +
+          ' Cooling needs v1.3.0 or newer. Load the latest sketch onto the node.';
+    } else if (f.sensorTemp == null || goal == null) {
+      icon = Icons.hourglass_empty;
+      color = AppColors.warn;
+      title = 'Waiting for the node\'s first report';
+      sub = 'The node is online but has not sent its cooling status yet.';
     } else if (f.commandPending) {
-      busy = true;
-      bar = true;
-      color = AppColors.teal;
-      title = 'Waiting for the node…';
-      sub = 'Command saved. The node picks it up within a few seconds.';
+      if (waited >= 20 || (info.err.isNotEmpty && waited >= 6)) {
+        icon = Icons.error_outline;
+        color = AppColors.danger;
+        title = 'The node has not responded';
+        sub = info.err.isNotEmpty
+            ? 'The node says: ${info.err}'
+            : 'It is online (firmware v${info.fw}) but has not picked up the request '
+                'after ${waited}s. Check that the simulator is running and visible, '
+                'and read its serial log.';
+      } else {
+        busy = true;
+        bar = true;
+        color = AppColors.teal;
+        title = 'Waiting for the node…';
+        sub = 'Command saved. The node picks it up within a few seconds.';
+      }
     } else if (!info.simulated) {
       final on = info.running == true;
       icon = on ? Icons.autorenew : Icons.power_settings_new;

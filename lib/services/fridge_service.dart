@@ -104,7 +104,20 @@ class FridgeService {
     final db = FirebaseDatabase.instance.ref();
     final key = db.child('commands/$id').push().key!;
 
-    final updates = <String, Object?>{
+    // What the node should do. ctlMode and ctlValue are ALWAYS written (never
+    // empty), so the node never has to read a missing value.
+    //   ctlMode 0 = automatic, 1 = adjust by ctlValue degrees, 2 = hold ctlValue degrees
+    var mode = 0;
+    var value = 0.0;
+    if (!reset && target != null) {
+      mode = 2;
+      value = target;
+    } else if (!reset && offset != null) {
+      mode = 1;
+      value = offset;
+    }
+
+    await db.update(<String, Object?>{
       'commands/$id/$key': {
         't': DateTime.now().millisecondsSinceEpoch,
         'type': type,
@@ -117,20 +130,12 @@ class FridgeService {
       // The node compares this number with the last one it carried out,
       // which is how the app can tell when a request has been picked up.
       'fridges/$id/cmdId': math.Random().nextInt(2000000000) + 1,
+      'fridges/$id/ctlMode': mode,
+      'fridges/$id/ctlValue': value,
+      // what the app shows on screen
+      'fridges/$id/targetTemp': mode == 2 ? value : null,
+      'fridges/$id/coolOffset': mode == 1 ? value : null,
       'fridges/$id/coolingLevel': null, // the old step setting is no longer used
-    };
-
-    if (reset) {
-      updates['fridges/$id/coolOffset'] = null;
-      updates['fridges/$id/targetTemp'] = null;
-    } else if (target != null) {
-      updates['fridges/$id/targetTemp'] = target;
-      updates['fridges/$id/coolOffset'] = null;
-    } else if (offset != null) {
-      updates['fridges/$id/coolOffset'] = offset;
-      updates['fridges/$id/targetTemp'] = null;
-    }
-
-    await db.update(updates);
+    });
   }
 }

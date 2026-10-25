@@ -2,8 +2,9 @@
 // Watches the Realtime Database and sends a push alert EVERY time a unit leaves
 // its safe range, and another when it is back inside it.
 //
-//   node index.js          run the sender (leave it running)
-//   node index.js --test   send one test notification and exit
+//   node index.js            run the sender (leave it running)
+//   node index.js --test     send one test notification and exit
+//   node index.js --reset    forget its saved alert state and exit
 
 const admin = require('firebase-admin');
 const path = require('path');
@@ -27,6 +28,7 @@ const RECOVER_MS = num('RECOVER_SECONDS', 0) * 1000; // 0 = every return to rang
 const ESCALATE_MS = num('ESCALATE_MINUTES', 15) * 60 * 1000; // still out = tell supervisors
 const STALE_MS = num('STALE_MINUTES', 15) * 60 * 1000; // ignore units silent this long
 const TICK_MS = 5 * 1000; // how often time-based rules are checked
+const STATUS_MS = 20 * 1000; // how often a status line is printed for each unit
 
 if (!fs.existsSync(KEY_PATH)) {
   console.error(
@@ -60,6 +62,8 @@ const limit = (v) => {
 
 const minutes = (ms) => Math.max(1, Math.round(ms / 60000));
 
+const clock = (ms) => new Date(ms).toLocaleTimeString();
+
 // ---------- Sending ----------
 
 async function push(topic, title, body, fridgeId, kind) {
@@ -76,10 +80,10 @@ async function push(topic, title, body, fridgeId, kind) {
       },
       apns: { payload: { aps: { sound: 'default' } } },
     });
-    log(`sent [${kind}] to "${topic}": ${title}`);
+    log(`PUSH SENT   [${kind}] to "${topic}": ${title}`);
     return true;
   } catch (err) {
-    log(`FAILED to send [${kind}]: ${err.message}`);
+    log(`PUSH FAILED [${kind}]: ${err.message}`);
     return false;
   }
 }
@@ -88,6 +92,8 @@ async function push(topic, title, body, fridgeId, kind) {
 
 let fridges = {}; // the latest copy of /fridges
 const states = {}; // one alert state per unit, mirrored in /alertState
+const notes = {}; // the last "ignored because..." message per unit
+const lastStatus = {}; // when a status line was last printed per unit
 let loaded = false;
 
 const freshState = () => ({
@@ -101,6 +107,13 @@ function save(id) {
   db.ref(`alertState/${id}`)
     .set(states[id])
     .catch((err) => log(`could not save state for ${id}: ${err.message}`));
+}
+
+// Logs a reason only when it changes, so the screen doesn't fill up
+function note(id, text) {
+  if (notes[id] === text) return;
+  notes[id] = text;
+  log(text);
 }
 
 function evaluate() {
@@ -118,13 +131,39 @@ function evaluate() {
     const temp = Number(f.temperature);
     const lastSeen = Number(f.lastSeen) || 0;
 
-    // Ignore units that have never reported or have gone quiet
-    if (lastSeen <= 0 || now - lastSeen > STALE_MS) continue;
-    if (![min, max, temp].every(Number.isFinite)) continue;
+    // Ignore units that have never reported or have gone quiet, and say why
+    if (lastSeen <= 0) {
+      note(id, `${name}: ignored, this unit has never reported a reading`);
+      continue;
+    }
+    const age = now - lastSeen;
+    if (age > STALE_MS) {
+      note(
+        id,
+        `${name}: ignored, last reading was ${minutes(age)} min ago ` +
+          `(${clock(lastSeen)}). If the unit is live, check this computer's clock.`
+      );
+      continue;
+    }
+    if (![min, max, temp].every(Number.isFinite)) {
+      note(id, `${name}: ignored, missing temperature or limits`);
+      continue;
+    }
+    delete notes[id]; // the unit is being watched again
 
     const above = temp > max;
     const out = above || temp < min;
     const muted = Number(f.mutedUntil) > now;
+
+    // a status line every so often, so it is always clear what the sender sees
+    if (!lastStatus[id] || now - lastStatus[id] >= STATUS_MS) {
+      lastStatus[id] = now;
+      log(
+        `watching ${name}: ${signed(temp)}°C, safe ${limit(min)} to ${limit(max)}, ` +
+          `${out ? 'OUT OF RANGE' : 'in range'}, state=${s.phase}` +
+          `${muted ? ', MUTED' : ''}, data ${Math.max(0, Math.round(age / 1000))}s old`
+      );
+    }
 
     // 1. the unit has just gone out of range
     if (s.phase === 'ok' && out) {
@@ -133,7 +172,7 @@ function evaluate() {
       s.recoverSince = 0;
       s.escalated = false;
       save(id);
-      log(`${name}: out of range (${signed(temp)}°C)`);
+      log(`${name}: went out of range (${signed(temp)}°C)`);
     }
 
     // 2. confirm it (instantly when CONFIRM_SECONDS is 0)
@@ -147,7 +186,7 @@ function evaluate() {
         s.phase = 'breach';
         save(id);
         if (muted) {
-          log(`${name}: breach confirmed, but alerts are muted`);
+          log(`${name}: breach confirmed, but alerts for this unit are MUTED, so no push`);
         } else {
           const where = above
             ? `above the safe maximum of ${limit(max)}`
@@ -175,7 +214,9 @@ function evaluate() {
           s.recoverSince = 0;
           s.escalated = false;
           save(id);
-          if (!muted) {
+          if (muted) {
+            log(`${name}: back in range, but alerts for this unit are MUTED, so no push`);
+          } else {
             push(
               'alerts',
               `${name}: back in range`,
@@ -217,6 +258,8 @@ function evaluate() {
   for (const id of Object.keys(states)) {
     if (!(id in fridges)) {
       delete states[id];
+      delete notes[id];
+      delete lastStatus[id];
       db.ref(`alertState/${id}`).remove().catch(() => {});
     }
   }
@@ -246,6 +289,9 @@ async function start() {
     'value',
     (snap) => {
       fridges = snap.val() || {};
+      if (!loaded) {
+        log(`connected to the database, watching ${Object.keys(fridges).length} unit(s)`);
+      }
       loaded = true;
       evaluate();
     },
@@ -269,6 +315,17 @@ if (process.argv.includes('--test')) {
     '',
     'test'
   ).then((ok) => process.exit(ok ? 0 : 1));
+} else if (process.argv.includes('--reset')) {
+  db.ref('alertState')
+    .remove()
+    .then(() => {
+      log('saved alert state cleared');
+      process.exit(0);
+    })
+    .catch((err) => {
+      log(`could not clear: ${err.message}`);
+      process.exit(1);
+    });
 } else {
   start();
 }
